@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const bookSchema = new mongoose.Schema({
   title: String,
   description: String,
-  author: { type: mongoose.Schema.Types.ObjectId, ref: 'Author' },
+	author: { type: mongoose.Schema.Types.ObjectId, ref: 'AuthorBookify' },
   fileId: String, // Telegramda saqlangan fayl ID
   category: String,
   createdAt: { type: Date, default: Date.now }

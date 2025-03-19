@@ -5,6 +5,7 @@ const User = require('./models/User')
 const { dbConnect } = require('./db/db.config')
 const Book = require('./models/Book')
 const Author = require('./models/Author')
+const Wishlist = require('./models/Wishlist')
 const bot = new Telegraf(process.env.BOT_TOKEN)
 
 const adminId = 6445758541
@@ -200,7 +201,7 @@ bot.command('addbook', async (ctx) => {
   if (ctx.from.id !== adminId) return ctx.reply("⛔ Bu buyruq faqat admin uchun!");
 
   const msg = ctx.message.text.split('|');
-	console.log(msg)
+
   if (msg.length < 6) {
     return ctx.reply(
       "❗ Format noto‘g‘ri!\n\n" +
@@ -212,13 +213,13 @@ bot.command('addbook', async (ctx) => {
   const [_, title, description, authorId, category, fileId] = msg.map(m => m.trim());
 
   try {
-    const author = await Author.findById(authorId);
+    const author = await Author.findOne({ customId: Number(authorId) }); // 💪 fix qildim
     if (!author) return ctx.reply("❗ Bunday muallif topilmadi!");
 
     const newBook = new Book({
       title,
       description,
-      author: author._id,
+      author: author._id,  // customId saqlayapsan
       category,
       fileId
     });
@@ -232,22 +233,13 @@ bot.command('addbook', async (ctx) => {
   }
 });
 
+
+
 const BOOKS_PER_PAGE = 5;
-
-bot.command('books', async (ctx) => {
-  sendBooksPage(ctx, 1);
-});
-
-bot.action(/books_page_(\d+)/, async (ctx) => {
-  const page = parseInt(ctx.match[1]);
-  await ctx.deleteMessage(); // Eski ro'yxat o'chadi
-  sendBooksPage(ctx, page);
-});
 
 async function sendBooksPage(ctx, page) {
   const totalBooks = await Book.countDocuments();
   const totalPages = Math.ceil(totalBooks / BOOKS_PER_PAGE);
-
   const currentPage = Math.max(1, Math.min(page, totalPages));
 
   const books = await Book.find()
@@ -260,135 +252,165 @@ async function sendBooksPage(ctx, page) {
   }
 
   let text = "📚 <b>Kitoblar ro‘yxati</b>\n\n";
-  books.forEach((book, index) => {
-    text += `📖 <b>${book.title}</b>\n✍️ Muallif: ${book.author.name}\n📂 Kategoriya: ${book.category}\n\n`;
+  const bookButtons = books.map(book => {
+    return [{ text: `📖 ${book.title}`, callback_data: `book_one_${book._id}` }];
   });
 
-  const buttons = [];
-  buttons.push([
+  const paginationButtons = [
     { text: '⏪', callback_data: `books_page_${currentPage - 1}` },
-    { text: `<<  ${currentPage}/${totalPages}  >>`, callback_data: 'disabled' },
-    { text: '⏩', callback_data: `books_page_${currentPage + 1}` },
+    { text: `${currentPage}/${totalPages}`, callback_data: 'disabled' },
+    { text: '⏩', callback_data: `books_page_${currentPage + 1}` }
+  ];
+
+  if (currentPage === 1) paginationButtons[0].callback_data = 'disabled';
+  if (currentPage === totalPages) paginationButtons[2].callback_data = 'disabled';
+
+  const inlineKeyboard = [...bookButtons, paginationButtons];
+
+  // Agar callback query bo'lsa edit qilamiz, bo'lmasa reply
+  if (ctx.updateType === 'callback_query') {
+    await ctx.editMessageText(text, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    });
+  } else {
+    await ctx.replyWithHTML(text, {
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    });
+  }
+}
+
+bot.command('books', async (ctx) => {
+  sendBooksPage(ctx, 1);
+});
+
+bot.on('callback_query', async (ctx) => {
+  const data = ctx.callbackQuery.data;
+  const userId = ctx.from.id;
+
+  if (data.startsWith('books_page_')) {
+    const page = parseInt(data.split('books_page_')[1]);
+    await sendBooksPage(ctx, page);
+    return ctx.answerCbQuery();
+  }
+
+  const { Markup } = require('telegraf'); // Markup to'g'ri chaqirilganiga ishonch hosil qiling
+
+if (data.startsWith('book_one_')) {
+    const bookId = data.split('book_one_')[1];
+    const book = await Book.findById(bookId).populate('author');
+
+    if (!book) return ctx.reply("Kitob topilmadi!");
+
+    const caption = `📖 <b>${book.title}</b>\n` +
+                    `✍️ <b>Muallif:</b> ${book.author.name}\n` +
+                    `📂 <b>Kategoriya:</b> ${book.category}\n` +
+                    `📝 <b>Tavsif:</b>\n${book.description}`;
+
+    const buttons = Markup.inlineKeyboard([
+        [Markup.button.callback("📚 O'qishni xohlayman", `want_to_read_${bookId}`)],
+        [Markup.button.callback("✅ O'qib bo'ldim", `mark_as_read_${bookId}`)]
+    ]);
+
+    if (book.fileId) {
+        await ctx.sendDocument(book.fileId, {
+            caption: caption,
+            parse_mode: 'HTML'
+        });
+        await ctx.sendMessage("Quyidagi tugmalar orqali amalni tanlang:", buttons);
+    } else {
+        await ctx.sendMessage(caption, { parse_mode: 'HTML', ...buttons });
+    }
+
+    return ctx.answerCbQuery();
+}
+
+
+
+  if (data.startsWith('want_to_read_')) {
+    const bookId = data.split('want_to_read_')[1];
+    
+    const existing = await Wishlist.findOne({ userId, bookId });
+    if (!existing) {
+      await Wishlist.create({ userId, bookId });
+      await ctx.answerCbQuery("✅ Kitob o'qishni xohlash ro'yxatiga qo'shildi!");
+    } else {
+      await ctx.answerCbQuery("📌 Bu kitob allaqachon ro'yxatda bor!");
+    }
+  }
+
+  if (data.startsWith('mark_as_read_')) {
+    const bookId = data.split('mark_as_read_')[1];
+
+    const existing = await Readlist.findOne({ userId, bookId });
+    if (!existing) {
+      await Readlist.create({ userId, bookId });
+      await Wishlist.deleteOne({ userId, bookId }); // O'qishni xohlash ro'yxatidan o'chirish
+      await ctx.answerCbQuery("✅ Kitob o'qilganlar ro'yxatiga qo'shildi!");
+    } else {
+      await ctx.answerCbQuery("📌 Bu kitob allaqachon o'qilgan!");
+    }
+  }
+
+  if (data.startsWith('remove_wishlist_')) {
+    const bookId = data.split('remove_wishlist_')[1];
+    await Wishlist.deleteOne({ userId, bookId });
+    await ctx.answerCbQuery("🗑 O'qishni xohlash ro'yxatidan o'chirildi!");
+    ctx.deleteMessage();
+  }
+
+  if (data.startsWith('remove_readlist_')) {
+    const bookId = data.split('remove_readlist_')[1];
+    await Readlist.deleteOne({ userId, bookId });
+    await ctx.answerCbQuery("🗑 O'qilgan kitoblar ro'yxatidan o'chirildi!");
+    ctx.deleteMessage();
+  }
+});
+
+bot.command('want_to_read', async (ctx) => {
+  const userId = ctx.from.id;
+  const wishlist = await Wishlist.find({ userId }).populate('bookId');
+
+  if (!wishlist.length) {
+    return ctx.reply("📌 Sizning o'qishni xohlash ro'yxatingiz bo'sh.");
+  }
+
+  const buttons = wishlist.map(entry => [
+    Markup.button.callback(`📖 ${entry.bookId.title}`, `book_one_${entry.bookId._id}`),
+    Markup.button.callback("❌ O'chirish", `remove_wishlist_${entry.bookId._id}`)
   ]);
 
-  // Cheklov: orqaga yoki oldinga bosish mumkin emasligini tekshirish
-  if (currentPage === 1) buttons[0][0].callback_data = 'disabled';
-  if (currentPage === totalPages) buttons[0][2].callback_data = 'disabled';
+  await ctx.reply("📚 O'qishni xohlash ro'yxatingiz:", Markup.inlineKeyboard(buttons));
+});
 
-  await ctx.replyWithHTML(text, {
-    reply_markup: { inline_keyboard: buttons }
-  });
-}
 
 bot.command('addauthor', async (ctx) => {
   if (ctx.from.id !== adminId) return ctx.reply('Bu buyruq faqat admin uchun!');
 
   const text = ctx.message.text.split(' ').slice(1).join(' ');
   if (!text) {
-    return ctx.reply('Iltimos, muallif nomi va bio kiriting. Misol: /addauthor MuallifNomi - Bio');
+    return ctx.reply('Iltimos, muallif nomi va bio kiriting. Misol: /addauthor Muallif Nomi | Bio');
   }
-
-  const [name, ...bioParts] = text.split('-');
-  if (!name || bioParts.length === 0) {
-    return ctx.reply('To\'g\'ri formatda kiriting: /addauthor Muallif Nomi - Bio');
+  const [name, bio] = text.split('|').map(str => str.trim());
+  if (!name || !bio) {
+    return ctx.reply('To‘g‘ri formatda kiriting: /addauthor Muallif Nomi | Bio');
   }
-
-  const bio = bioParts.join('-').trim();
 
   try {
+    const lastAuthor = await Author.findOne().sort({ customId: -1 });
+    const customId = lastAuthor ? lastAuthor.customId + 1 : 1;
+
     const newAuthor = new Author({
-      name: name.trim(),
-      bio
+      name,
+      bio,
+      customId
     });
+
     await newAuthor.save();
-    ctx.reply(`✅ Muallif qo‘shildi:\n\n📖 Nomi: ${newAuthor.name}\n📝 Bio: ${newAuthor.bio}`);
+    ctx.reply(`✅ Muallif qo‘shildi:\n\n🆔 ID: ${newAuthor.customId}\n📖 Nomi: ${newAuthor.name}\n📝 Bio: ${newAuthor.bio}`);
   } catch (err) {
     console.error(err);
-    ctx.reply('Xatolik yuz berdi, keyinroq urinib ko‘ring.');
-  }
-});
-
-const ITEMS_PER_PAGE = 5;
-
-// Mualliflarni chiqarish
-async function sendAuthors(ctx, page = 1) {
-  const userId = ctx.from.id;
-  const totalAuthors = await Author.countDocuments();
-  const totalPages = Math.ceil(totalAuthors / ITEMS_PER_PAGE);
-
-  if (page < 1) page = 1;
-  if (page > totalPages) page = totalPages;
-
-  const authors = await Author.find()
-    .skip((page - 1) * ITEMS_PER_PAGE)
-    .limit(ITEMS_PER_PAGE);
-
-  if (!authors.length) {
-    return ctx.reply('Hozircha mualliflar mavjud emas.');
-  }
-
-  let text = `<b>📚 Mualliflar (${page}/${totalPages}):</b>\n\n`;
-  const buttons = [];
-
-  authors.forEach((author, index) => {
-		const authorName = author.name || "Noma'lum Muallif";
-		if (userId === adminId) {
-			text += `${index + 1}. ${authorName}\n🆔 <code>${author._id}</code>\n\n`;
-		}
-		buttons.push([{ text: authorName, callback_data: `author_${author._id}` }]);
-	});
-	
-
-  // Navigatsiya tugmalari
-  const navButtons = [];
-  if (page > 1) navButtons.push({ text: '⬅️ Oldingi', callback_data: `authors_page_${page - 1}` });
-  navButtons.push({ text: `${page}/${totalPages}`, callback_data: 'ignore' });
-  if (page < totalPages) navButtons.push({ text: '➡️ Keyingi', callback_data: `authors_page_${page + 1}` });
-
-  buttons.push(navButtons);
-
-  await ctx.replyWithHTML(text, {
-    reply_markup: { inline_keyboard: buttons }
-  });
-}
-
-// /authors komandasi
-bot.command('authors', async (ctx) => {
-  let page = 1;
-  const args = ctx.message.text.split(' ');
-  if (args.length > 1) page = parseInt(args[1]) || 1;
-  await sendAuthors(ctx, page);
-});
-
-// Callback querylarni ushlaymiz
-bot.on('callback_query', async (ctx) => {
-  const data = ctx.callbackQuery.data;
-
-  // Muallif sahifalash
-  if (data.startsWith('authors_page_')) {
-    const page = parseInt(data.split('_')[2]);
-    await ctx.deleteMessage();
-    await sendAuthors(ctx, page);
-  }
-
-  // Muallif ustiga bosilganda shu muallif kitoblarini chiqarish
-  else if (data.startsWith('author_')) {
-    const authorId = data.split('_')[1];
-    await ctx.deleteMessage();
-    const books = await Book.find({ author: authorId });
-
-    if (!books.length) {
-      return ctx.reply('Bu muallifda hozircha kitoblar yo‘q.');
-    }
-
-    let text = `<b>📖 Ushbu muallif kitoblari:</b>\n\n`;
-    books.forEach((book, index) => {
-      text += `${index + 1}. ${book.title}\n`;
-    });
-
-    await ctx.replyWithHTML(text);
-  } else {
-    await ctx.answerCbQuery();
+    ctx.reply('❌ Xatolik yuz berdi, keyinroq urinib ko‘ring.');
   }
 });
 
